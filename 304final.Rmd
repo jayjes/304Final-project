@@ -1,6 +1,8 @@
 ---
 title: "A Classification Approach to Examine \"Would the Liberal Party Still be in Power Should Everyone Voted in 2019\""
-author: "Weizhi Guo"
+author: 
+- Weizhi Guo
+- https://github.com/jayjes/304Final-project.git
 abstract: "Would Justin Trudeau and his Liberal Party win the 2019 election if every single eligible Canadian voter has voted in 2019? We attempt to explore the this question by formulating it as a classification problem based on a post 2019 election survey study and 2016's census data.\\par\\textbf{Keywords:} 2019 Canadian Election, Classification, Logistic Regression"
 date: "22nd December, 2020"
 header-includes:

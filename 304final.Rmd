@@ -1,0 +1,335 @@
+---
+title: "A Classification Approach to Examine \"Would the Liberal Party Still be in Power Should Everyone Voted in 2019\""
+author: "Weizhi Guo"
+abstract: "Would Justin Trudeau and his Liberal Party win the 2019 election if every single eligible Canadian voter has voted in 2019? We attempt to explore the this question by formulating it as a classification problem based on a post 2019 election survey study and 2016's census data.\\par\\textbf{Keywords:} 2019 Canadian Election, Classification, Logistic Regression"
+date: "22nd December, 2020"
+header-includes:
+   - \usepackage{amsmath}
+   - \usepackage{dsfont}
+output: 
+  pdf_document:
+    fig_caption: true
+---
+
+# Introduction
+In the past two year, Justin Trudeau and his Liberal Party was heavily criticized for corruption$^3$, their approach of handling international relations$^2$, their response to controlling the spread of the novel coronavirous$^{13}$, and numerous of other domestic and international affairs. It's only normal that one is curious about what would have happened if Andrew Scheer and the Conservative Party, or even Jagmeet Singh and the NDP has won the election. Would Canada have been in a better position if the country is under a different leadership. It would be difficult to obtain evidence to make a conclusive statement on this matter. One can, nonetheless, run simulations and make predictions on, for example, Canada's economic status if the country is under a different governing party. It would be a very difficult task both mathematically and computationally as there are thousands of variables to investigate and control for. One always, however, has to start with the question "what would have happened it the election outcomes were different", and a way to beginning this investigating is to find out "what would have happened if everyone voted in 2019". In this article, we will be employing multilevel regression and post-stratification method along with a logistic regression to classify voters' voting choices. The variables we will be controlling for are voters' age, gender, education level, and region where they casted their votes. Once the model is established, we will be using it to predict the 2019 election result as if everyone has voted.
+
+# Methodology
+We will be utilizing the Canadian Election Study$^{11}$ (CES)'s 2019 post-election survey data as our training data. As per the documentation mentions, the dataset consists of 37822 observations. The gender distribution of the study population was targeted at 50% male and 50% female participants. The study population were targeted to include 28% of people who were of the age from 18-34, 33% from 35-54, and 39% of age 55% and above. 80% of French Canadian and 20% of English speaking Canadian were also targeted at the study population with Quebec, 10% French Canadian within the Atlantic provinces (Newfoundland and Labrador, New Brunswick, Nova Scotia, Prince Edward Island), and 10% French Canadian nationally. These were ambitious targets. Also, observational studies rarely attain their goals of sampling from the target population. We can expect some measurement bias in estimation from the CES data. Furthermore, as an observational study, the CES data was highly likely to be subjected selection bias. As a result, we will be utilizing Statistics Canada's *Highest level of educational attainment (general) by sex and selected age groups* census data$^5$ for post stratification and prediction. One would, normally, consider census data as a more reliable population data source even though one cannot completely rule out the possibility of measurement or selection bias. The census data we will be using was from 2016, which was the latest census data we could obtain. We settled on this dataset because people's level of education was known to effect voting behaviours$^1$. 
+
+We selected `cps19_votechoice`, `cps19_gender`, `cps19_province`, `cps19_education`, `cps19_age` from the CES data. These variables correspond to the voter's vote choice, gender, location, their education level, and age. Upon close inspection of the dataset, we saw 6258 missing values in the `cps19_votechoice` column and 0 missing values in the rest of the variables. As, 6258 observations were not a big proportion of the 37822 study populations. We will be deleting these observations. We will also be collapsing some factors of the voter's response. Specifically, we will be collapsing the "Another party (please specify)", and "Don't know/ Prefer not to answer" into a `Other` category. We will also discretize people's age into bins `[18,34)`, `[34,55)`, and `[55,120)`. Finally, we will only consider the education groups`>BA`, `<BA`, and `college`, which correspond to people with a bachelor's degree or higher, people without a college or professional degree, and people with a college or professional degree, respectively. The educational census data from Statistics Canada will also be cleansed in a similar manner. The census data will be used to calculate the post-stratification proportions for each predictor, and these proportions will be used to predict the 2019 election outcome.
+
+```{r prepare, include=F, echo=F}
+library(cesR)
+library(labelled)
+library(tidyverse)
+library(ggplot2)
+library(nnet)
+library(broom)
+set.seed(101010)
+
+get_ces("ces2019_web")
+ces2019_web = to_factor(ces2019_web)
+
+CESDat = ces2019_web %>% 
+  select(cps19_votechoice,cps19_gender, 
+         cps19_province,cps19_education,  
+         cps19_age) %>% 
+  mutate(votechoice = recode(cps19_votechoice,
+                                   "Liberal Party" = "Liberal",
+                                   "Conservative Party" = "Conservative",
+                                   "ndp" = "NDP",
+                                   "Green Party" = "Green Party",
+                                   "People's Party" = "People's Party",
+                                   "Another party (please specify)" = "Other",
+                                   "Don't know/ Prefer not to answer" = "Other"), # recode voting intention for simplicity
+         gender = as.factor(recode(cps19_gender,
+                                   "A man" = "Male",
+                                   "A woman"  = "Female",
+                                   "Other (e.g. Trans, non-binary, two-spirit, gender-queer)" = "Other")), 
+         edu_group = recode(cps19_education, 
+                                  "No schooling" = "<BA",
+                                  "Some elementary school" = "<BA",
+                                  "Completed elementary school" = "<BA",
+                                  "Some secondary/ high school" = "<BA",
+                                  "Completed secondary/ high school" = "<BA",
+                                  "Some technical, community college, CEGEP, College Classique"="college",
+                                  "Completed technical, community college, CEGEP, College Classique"="college",
+                                  "Some university"=">BA",
+                                  "Bachelor's degree"=">BA",
+                                  "Master's degree"=">BA",
+                                  "Professional degree or doctorate"=">BA",
+                                  "Don\'t know/ Prefer not to answer"="other"), # recode education level
+         age_group = as.factor(as.character(cut(cps19_age, breaks = c(18,34,55,120), right = F))), # discretize age
+         province = as.factor(cps19_province)) %>%
+  filter(!is.na(votechoice)) %>%
+  select(votechoice,gender, 
+         province,edu_group,  
+         age_group)
+
+censusDat = read.csv('./DATA/censusDat.csv')
+educ_cols_count<-c("No.certificate..diploma.or.degree..2016.counts.",
+                   "Secondary..high..school.diploma.or.equivalency.certificate..2016.counts.",
+                   "Apprenticeship.or.trades.certificate.or.diploma..2016.counts.",
+                   "College..CEGEP.or.other.non.university.certificate.or.diploma..2016.counts.",
+                   "University.certificate.or.diploma.below.bachelor.level..2016.counts.",
+                   "University.certificate..diploma.or.degree.at.bachelor.level.or.above..2016.counts.")
+
+cDat = censusDat %>% 
+  select(Age,Sex,educ_cols_count,Geographic.name) %>%
+  pivot_longer(cols=educ_cols_count,names_to='edu_group',
+               values_to="total_count") %>% # take transpose of dataset
+  mutate(edu_group = recode(edu_group, 
+                            "No.certificate..diploma.or.degree..2016.counts." = "<BA",
+                            "Secondary..high..school.diploma.or.equivalency.certificate..2016.counts." = "<BA",
+                            "Apprenticeship.or.trades.certificate.or.diploma..2016.counts." = "college",
+                            "College..CEGEP.or.other.non.university.certificate.or.diploma..2016.counts." = "college", # reocde education level
+                            "University.certificate.or.diploma.below.bachelor.level..2016.counts." = "<BA",
+                            "University.certificate..diploma.or.degree.at.bachelor.level.or.above..2016.counts."=">BA")) %>%
+  filter(!("All ages, 15-plus" == Age | Sex == "Both sexes") & !(Age == '25 to 64') & !(Geographic.name=='Canada')) %>%
+  mutate(age_group = as.factor(recode(Age,
+                                      "25 to 34" = "[18,34)",
+                                      "35 to 44" = "[34,55)",
+                                      "45 to 54" = "[34,55)",
+                                      "55 to 64" = "[55,120)")), # recode age group
+         gender = as.factor(ifelse(Sex == 'Male', 'Male', 'Female')), # recode gender
+         province = as.factor(Geographic.name)) %>%
+  select(age_group, gender, edu_group, province, total_count)
+  
+# post-stratification
+tab <- cDat %>% 
+  group_by(age_group, gender, edu_group, province) %>% 
+  summarise(n = sum(total_count))%>% 
+  ungroup()
+
+provinceProp <- tab %>% 
+  ungroup() %>% 
+  group_by(province) %>% 
+  mutate(prop = n/sum(n))  %>% 
+  ungroup()
+
+age_prop <- tab %>% 
+  ungroup() %>% 
+  group_by(age_group) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  ungroup()
+
+edu_prop <- tab %>% 
+  ungroup() %>% 
+  group_by(edu_group) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  ungroup()
+
+gender_prop <- tab %>% 
+  ungroup() %>% 
+  group_by(gender) %>% 
+  mutate(prop = n/sum(n)) %>% 
+  ungroup()
+```
+
+In Figure 1, we examine if the CES dataset's sampling goal was achieved with by visualizing their frequency
+
+```{r,  echo=F, fig.height=5, fig.width=8, fig.cap="Proportion of the Study Sample"}
+par(mfrow=c(2,2))
+barplot(prop.table(table(CESDat$age_group)), 
+        main = 'Age Group Proportion')
+barplot(prop.table(table(CESDat$province)), 
+        main = 'Province Proportion')
+barplot(prop.table(table(CESDat$edu_group)), 
+        main = 'Level of Education Proportion')
+barplot(prop.table(table(CESDat$gender)), 
+        main = 'Gender Proportion')
+```
+
+We see that the age group's objective was roughly achieved, but the population from each province or territory was clearly not evenly sampled. The sample from Ontario dominates most of the study population. Quebec comes next. One should keep in mind that some provinces or territories such as the New Brunswick and Northwest Territories would be under-represented. For level of education and gender, no one obvious category was over or under sampled.
+
+For the mathematical formulation of the model, we will be using multinomial logistic regression in the classical framework to classify voters' voting choice based on location, age groups, education level, and gender. For modeling The mathematical formulation is as follow
+\begin{equation}
+  \text{logit }\mathds{P}(Y_i = j) = \beta_0 + \beta_1 \times \text{location} + \beta_2 \times \text{age} + \beta_3 \times \text{education} + \beta_4 \times \text{gender}
+\end{equation}
+for $i \in [1,31564]$, and $j$ is the enumeration of people's voting choice, and $j = 1,2,3,4,5,6,7$, representing the Liberal, Conservative, NDP, Bloc Quebecois, Green Party, People's Party, and Other, respectively. We use logistic regression in the classical framework because all our predictors are of discrete nature. We lack additional knowledge in terms of their prior distributions. As a preliminary estimation, however, a logistic regression model in the classical framework will suffice.
+
+```{r model, include=F, echo=F}
+# built model via nnet::multinom
+mod = multinom(votechoice ~ age_group + edu_group + gender + province, 
+               data = CESDat, maxit = 150)
+mod_perf = glance(mod)
+resP = predict(mod,newdata = CESDat)
+tbl = table(resP, CESDat$votechoice)
+```
+
+# Results
+We first evaluate the model's performance with the training data. We obtain the following confusion matrix.
+
+\[
+\begin{matrix}
+ &  \text{Liberal} & \text{Conservative} & \text{NDP} & \text{Bloc Québécois} & \text{Green Party} & \text{People's Party} & \text{Other} \\
+\text{Liberal} & 5873 &3653 & 2216 &863 &1462 &294 &2858 \\
+\text{Conservative} & 2064 & 4284 & 1380 & 0  & 681 &225 & 1547\\
+\text{NDP} & 422 & 385 & 590 & 2 & 204 & 46 & 201 \\
+\text{Bloc Québécois} & 346 & 246 & 51 & 388 & 37 & 16 & 259 &\\
+\text{Green Party} & 13 & 9 & 12 & 0 & 15 & 4 & 14\\
+\text{People's Party} & 0  & 0  & 0 & 0  & 0 & 0 & 0\\
+\text{Other} & 231 & 136 & 79 & 151 & 57 & 20 & 230
+\end{matrix}
+\]
+
+This model yielded `r signif(sum(diag(tbl)) / sum(tbl), 5)` training error. We will further discuss the implication of this model under the discussion section.
+
+We will proceed to predict with the post-stratified data next.
+```{r predict, include=F,echo=F}
+createDF = function(pred, dataset) {
+  newdf = dataset
+  newdf$prediction = pred
+  return(newdf)
+}
+
+predictVote = function(dataset) {
+  pred = predict(mod,newdata = dataset)
+  predDF = createDF(pred, dataset)
+  return(predDF)
+}
+
+pred_province = predictVote(provinceProp)
+pred_age = predictVote(age_prop)
+pred_edu = predictVote(edu_prop)
+pred_gender = predictVote(gender_prop)
+
+pred_province = pred_province %>% 
+  group_by(province,prediction) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+
+pred_age = pred_age %>% 
+  group_by(age_group,prediction) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+
+pred_edu = pred_edu %>% 
+  group_by(edu_group,prediction) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+
+pred_gender = pred_gender %>% 
+  group_by(gender, prediction) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n))
+```
+
+```{r, echo=F, fig.height=8, fig.width=10, fig.cap="Voting Choice Aggregated by Province"}
+ggplot(pred_province, aes(fill=prediction, y=freq, x=province)) + 
+  geom_bar(position="fill", stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("Proportion") + xlab("Provinces and Territories") +
+  scale_fill_brewer(palette="Dark2")
+```
+
+In Figure 2, we aggregated the people's voting intention by province and obtained that the Conservative party would have won in Alberta, BC, Manitoba, and Saskatchewan. The Liberal Party, on the other hand, would have won the rest of the provinces and territories. Bloc Québécois only got support in Quebec. The Green Party had relative large support from Prince Edward Island.
+
+```{r, echo=F, fig.height=3, fig.width=6, fig.cap="Voting Choice Aggregated by Age"}
+ggplot(pred_age, aes(fill=prediction, y=freq, x=age_group)) + 
+  geom_bar(position="fill", stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("Proportion") + xlab("Age Groups") +
+  scale_fill_brewer(palette="Dark2")
+```
+
+In Figure 3, we aggregated the data by age groups. We saw younger people tend to vote for parties other than the Conservative and the Liberal Party. But the Liberal Party still dominate across all age groups, despite that the older the population, the more likely they vote for the Conservative Party.
+
+```{r, echo=F, fig.height=3, fig.width=6, fig.cap="Voting Choice Aggregated by Education Level"}
+ggplot(pred_edu, aes(fill=prediction, y=freq, x=edu_group)) + 
+  geom_bar(position="fill", stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("Proportion") + xlab("Education Level") +
+  scale_fill_brewer(palette="Dark2")
+```
+
+We considered the education levels in Figure 4. People without a Bachelor's degree is more likely to vote for the Conservative Party, while the people with a Bachelor or higher degree tend to vote for the Liberal Party.
+
+```{r, echo=F, fig.height=3, fig.width=6, fig.cap="Voting Choice Aggregated by Gender"}
+ggplot(pred_gender, aes(fill=prediction, y=freq, x=gender)) + 
+  geom_bar(position="fill", stat="identity") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("Proportion") + xlab("Gender") + 
+  scale_fill_brewer(palette="Dark2")
+```
+
+Finally, in Figure 5, aggregating by gender, men are more much more likely to cast their votes for the conservative Party. Both genders have equal tendency to vote for the Liberal Party.
+
+Overall, based on the model we have after post-stratification and assume that everyone has voted, Justin Trudeau and his Liberal Party would still won the 2019 election, and the Conservative Party would still be in the runner-up.
+
+# Discussion
+For this study we used the CES dataset. As we said in the methodology section, the CES was an observational study, and the response were collected via a survey. Several problems arise with this format of study. First of all, the volunteer bias and recall bias can be potential problems. Those who consented to participate in the study might be those people who are politically active. Their counterparts are under-represented in the CES study. Furthermore, when filling out surveys, people might have difficulty filling in the most accurate information. Measurement bias might also complicate the reliability of the study. As per the CES documentation mentions, the practitioners had specific sampling goals, but their goals might be difficult to achieve, and if the goal was not attained, certain population's voting information might be less accurate. Additionally, we noticed that the documentation did not mention anything about the Native Canadian population. We were unsure if the practitioners neglected the Native Canadians or they implicitly assumed they were able to obtain an adequate sample that represents the Native Canadians. We briefly examined if the outlined goal was achieved and concluded that the study population were dominated with samples from Ontario and Quebec. We expect the mentioned problems with the CES dataset to cause bias in the model as we did not use the census data to train our model. We hope that post-stratification would rectify the bias as we said census data are generally more reliable. Future investigations can be done to investigate if post-stratification actually lower the bias from a biased training dataset and model.
+
+We did not perform variable selection in this article. We chose the "most relevant" ones based on common sense. Some valuable information may offer more insights into people's voting intention.  Future works can perform more rigorous and systematic method of predictors selection. We could take into account for the fact that the language spoken could potentially affect people's voting intention. Interactions between predictors could be further investigated as well.
+
+The prediction results divulged that the Liberal Party would still win the 2019 election assuming everyone has voted. We will not be discussing and analyzing any political implication in this article. Instead we will discuss about the model. Readers might have noticed that the logistic regression model was performing poorly in terms of the predicting the voter's intention. The accuracy was quite low. The low accuracy might be a result of few causes. Firstly, the CES dataset might not suit the format of logistic regression. For example, the voters might not form clear clusters with unambiguous hyper-plane boundaries. Even though we have collapsed some factors, the number of factors in `province` is still relatively high. Further investigations can be done to select a suitable model for the CES dataset. Non-parametric models such as the tree-based models or boosting might work better than logistic regression. Another reason might be that we did not fully utilized the available information for the logistic regression model. Election results are well studied subjects. One can construct a suitable prior distribution from a previous study on our predictors and utilize one of the Bayesian classification methods to, hopefully, improve prediction accuracy.
+
+# Conclusion
+In this article, we utilized multinomial logistic regression and post-stratification to examine the question "what if everyone has voted in the 2019 election". We gathered training data from CES and educational level census data and chose age groups, educational level, gender, and the voter's residing province territory as predictors. We cleansed the two datasets into compatible formats. For the CES dataset, in particular, we aimed to follow CES's documentation and organized voters' age into bins. We also organized the educational levels into people with a Bachelor's degree or a profession degree or without the two said degrees. Collapsing the age and educations not only helped to reduce the number factors, the method combines factors with very few observations. This would minimize the number of outliers, which is generally consider an obstacle for regression models. Despite the fact that our prediction accuracy was low, one can get a preliminary idea on what would have happened if every Canadian citizen voted in 2019, controlling for age, gender, level of education, and voters' residing province. The election outcome is still the same as it was today.
+
+\newpage
+
+
+# Appendix A
+The following are the post-stratified predicted datasets aggregated by each predictor
+
+```{r, echo=F}
+knitr::kable(pred_province, "simple", caption = "Voting Intention Group by Province/Territory")
+knitr::kable(pred_age, "simple", caption = "Voting Intention Group by Age")
+knitr::kable(pred_edu, "simple", caption = "Voting Intention Group by Education")
+knitr::kable(pred_gender, "simple", caption = "Voting Intention Group by Gender")
+```
+
+# Appendix B
+We used `nnet::multinom` to build our multinomial classification model. `nnet`'s implementation is based on feed-forward neural network and it was consider a more rigorous implementation than `glm` for multinomially models.
+
+\newpage
+
+# Reference
+
+1. Archer, K. (1987). A simultaneous equation model of Canadian voting behaviour. Canadian Journal of Political Science/Revue canadienne de science politique, 20(3), 553-572.
+
+2. Black, C. (2020, December 04). Conrad Black: The Liberal government's policy of self-impoverishment will hurt us all. Retrieved December 22, 2020, from https://nationalpost.com/opinion/conrad-black-the-liberal-governments-policy-of-self-impoverishment-will-hurt-us-all.
+ 
+3. Blatchford, A. (2020, July 24). Trudeau strains to contain political scandal engulfing his family. Retrieved December 22, 2020, from https://www.politico.com/news/2020/07/24/trudeau-political-scandal-family-381002.
+
+4. David Robinson, Alex Hayes and Simon Couch (2020). broom: Convert
+Statistical Objects into Tidy Tibbles. R package version 0.7.3.
+https://CRAN.R-project.org/package=broom.
+
+5. Statistics Canada, (2017, November 27). Education Highlight Tables, 2016 Census. Retrieved December 22, 2020, from https://www12.statcan.gc.ca/census-recensement/2016/dp-pd/hlt-fst/edu-sco/index-eng.cfm.
+  
+6. H. Wickham. ggplot2: Elegant Graphics for Data Analysis.
+Springer-Verlag New York, 2016.
+
+7. JJ Allaire and Yihui Xie and Jonathan McPherson and Javier Luraschi
+  and Kevin Ushey and Aron Atkins and Hadley Wickham and Joe Cheng and
+  Winston Chang and Richard Iannone (2020). rmarkdown: Dynamic
+  Documents for R. R package version 2.3. URL
+  https://rmarkdown.rstudio.com.
+  
+8. Joseph Larmarange (2020). labelled: Manipulating Labelled Data. R
+  package version 2.7.0. https://CRAN.R-project.org/package=labelled
+
+9. Paul A. Hodgetts and Rohan Alexander (2020). cesR: Access the CES
+Datasets a Little Easier.. R package version 0.1.0.
+
+10. R Core Team (2020). R: A language and environment for statistical
+  computing. R Foundation for Statistical Computing, Vienna, Austria.
+  URL https://www.R-project.org/.
+  
+12. Stephenson, Laura B., et al. 2019 Canadian Election Study - Online Survey. 1 May 2020. dataverse.harvard.edu, doi:10.7910/DVN/DUS88V.
+  
+12. Venables, W. N. & Ripley, B. D. (2002) Modern Applied Statistics with
+  S. Fourth Edition. Springer, New York. ISBN 0-387-95457-0.
+  
+13. Wherry, A. (2020, November 27). The Conservatives fire up a phoney war over the 'Great Reset' theory | CBC News. Retrieved December 22, 2020, from https://www.cbc.ca/news/politics/great-reset-trudeau-poilievre-otoole-pandemic-covid-1.5817973
+
+14. Wickham et al., (2019). Welcome to the tidyverse. Journal of Open
+  Source Software, 4(43), 1686, https://doi.org/10.21105/joss.01686.
+
+15. Yihui Xie and J.J. Allaire and Garrett Grolemund (2018). R Markdown:
+  The Definitive Guide. Chapman and Hall/CRC. ISBN 9781138359338. URL
+  https://bookdown.org/yihui/rmarkdown.
+  
